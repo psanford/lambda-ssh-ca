@@ -225,6 +225,8 @@ func (s *server) authorizeHandlerGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// these come from a lambda authorizer that is protecting this route
+	// implementing this is left as an exercise to the reader
 	username := lambdaReq.RequestContext.Authorizer.Lambda["pmsauth-username"].(string)
 	isSudo := lambdaReq.RequestContext.Authorizer.Lambda["pmsauth-is-sudo"].(bool)
 
@@ -309,6 +311,8 @@ func (s *server) authorizeHandlerPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// these come from a lambda authorizer that is protecting this route
+	// implementing this is left as an exercise to the reader
 	username := lambdaReq.RequestContext.Authorizer.Lambda["pmsauth-username"].(string)
 	isSudo := lambdaReq.RequestContext.Authorizer.Lambda["pmsauth-is-sudo"].(bool)
 
@@ -451,11 +455,6 @@ func (s *server) saveAudit(auditEvent AuditEvent) error {
 		Body:   bytes.NewReader(marhalledAudit),
 	})
 	return err
-}
-
-type Authorizor struct {
-	Username string `json:"pmsauth-username"`
-	IsSudo   bool   `json:"pmsauth-is-sudo"`
 }
 
 type AuditEventType int
