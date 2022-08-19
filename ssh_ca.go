@@ -28,6 +28,7 @@ import (
 	"github.com/inconshreveable/log15"
 	"github.com/psanford/kmssigner"
 	"github.com/psanford/lambda-ssh-ca/internal/msgs"
+	"github.com/psanford/lambda-ssh-ca/internal/slack"
 	"github.com/psanford/lambdahttp/lambdahttpv2"
 	"github.com/psanford/logmiddleware"
 	"golang.org/x/crypto/ssh"
@@ -65,6 +66,8 @@ func main() {
 		panic("kms_arn not set in parameter store")
 	}
 
+	webhookURL, _ := kv.get("slack_webhook")
+
 	sess := session.Must(session.NewSession())
 	s3client := s3.New(sess)
 
@@ -95,6 +98,7 @@ func main() {
 		s3:          s3client,
 		templates:   templ,
 		caKey:       sshSinger,
+		webHookURL:  webhookURL,
 	}
 
 	mux := http.NewServeMux()
@@ -119,6 +123,7 @@ type server struct {
 	caKey       ssh.Signer
 	s3          *s3.S3
 	templates   *template.Template
+	webHookURL  string
 }
 
 func (s *server) challengeHandler(w http.ResponseWriter, r *http.Request) {
@@ -178,15 +183,15 @@ func (s *server) challengeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auditEvent := AuditEvent{
+	auditEvent := msgs.AuditEvent{
 		Time:              now,
-		EventType:         AuditEventPleaseSignRequest,
+		EventType:         msgs.AuditEventPleaseSignRequest,
 		ID:                reqID,
 		PleaseSignRequest: pleaseSignReq,
 		PubKeyFingerprint: fingerPrint,
 	}
 
-	err = s.saveAudit(auditEvent)
+	err = s.saveAudit(lgr, auditEvent)
 	if err != nil {
 		lgr.Error("save_audit_log_err", "err", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -366,15 +371,15 @@ func (s *server) authorizeHandlerPost(w http.ResponseWriter, r *http.Request) {
 	fingerPrint := ssh.FingerprintSHA256(pub)
 
 	now := time.Now()
-	auditEvent := AuditEvent{
+	auditEvent := msgs.AuditEvent{
 		Time:              now,
-		EventType:         AuditEventSignRequest,
+		EventType:         msgs.AuditEventSignedRequest,
 		ID:                reqID,
 		PleaseSignRequest: req,
 		PubKeyFingerprint: fingerPrint,
 	}
 
-	err = s.saveAudit(auditEvent)
+	err = s.saveAudit(lgr, auditEvent)
 	if err != nil {
 		lgr.Error("save_audit_log_err", "err", err)
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -440,7 +445,7 @@ type PendingTmpl struct {
 	KeyFingerprint string
 }
 
-func (s *server) saveAudit(auditEvent AuditEvent) error {
+func (s *server) saveAudit(lgr log15.Logger, auditEvent msgs.AuditEvent) error {
 	marhalledAudit, err := json.Marshal(auditEvent)
 	if err != nil {
 		panic(err)
@@ -454,31 +459,15 @@ func (s *server) saveAudit(auditEvent AuditEvent) error {
 		Key:    &auditEventPath,
 		Body:   bytes.NewReader(marhalledAudit),
 	})
-	return err
-}
 
-type AuditEventType int
-
-const (
-	AuditEventPleaseSignRequest AuditEventType = 1
-	AuditEventSignRequest       AuditEventType = 2
-)
-
-func (t AuditEventType) String() string {
-	switch t {
-	case AuditEventPleaseSignRequest:
-		return "AuditEventPleaseSignRequest"
-	case AuditEventSignRequest:
-		return "AuditEventSignRequest"
-	default:
-		return fmt.Sprintf("AuditEventUnknownType<%d>", t)
+	if s.webHookURL != "" {
+		go func() {
+			err := slack.PostEvent(s.webHookURL, &auditEvent)
+			if err != nil {
+				lgr.Error("post_to_slack_webhook_err", "err", err)
+			}
+		}()
 	}
-}
 
-type AuditEvent struct {
-	Time              time.Time              `json:"time"`
-	EventType         AuditEventType         `json:"event_type"`
-	ID                string                 `json:"id"`
-	PleaseSignRequest msgs.PleaseSignRequest `json:"please_sign_request"`
-	PubKeyFingerprint string                 `json:"public_key_fingerprint"`
+	return err
 }
