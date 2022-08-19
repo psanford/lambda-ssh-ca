@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -15,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -46,74 +46,19 @@ func main() {
 	log15.Root().SetHandler(handler)
 	lgr := log15.New()
 
-	// key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	// if err != nil {
-	// 	lgr.Error("generate_ssh_key_err", "err", err)
-	// 	os.Exit(1)
-	// }
+	a := &Agent{}
 
-	// signer, err := ssh.NewSignerFromKey(key)
-	// if err != nil {
-	// 	lgr.Error("new_signer_from_key_err", "err", err)
-	// 	os.Exit(1)
-	// }
-
-	// fmt.Println(signer.PublicKey())
-
-	// hostname, _ := os.Hostname()
-	// username := os.Getenv("USER")
-	// if user, err := user.Current(); err == nil {
-	// 	username = user.Username
-	// }
-
-	// req := msgs.SignRequest{
-	// 	PublicKey: signer.PublicKey().Marshal(),
-	// 	Host:      hostname,
-	// 	Username:  username,
-	// }
-
-	// resp := makeRequest(req)
-
-	// openBrowser(resp.AuthorizeURL)
-
-	// for i := 0; i < 100; i++ {
-	// 	time.Sleep(5 * time.Second)
-	// 	result := checkResult(resp.FetchCertURL)
-	// 	if result.Status == msgs.SignResultFail {
-	// 		lgr.Error("Signature request failed")
-	// 		os.Exit(1)
-	// 	}
-	// 	if result.Status == msgs.SignResultSuccess {
-	// 		success = true
-	// 		break
-	// 	}
-	// }
-
-	// pubKeyCert, err := parseOpenSSHPublicKey(signedResp.SignedCert)
-	// if err != nil {
-	// 	lgr.Error("parse_public_key_cert_err", "err", err)
-	// 	os.Exit(1)
-	// }
-
-	// privateKey, err := appKey.Private(appKey.Public())
-	// if err != nil {
-	// 	lgr.Error("get_app_private_key_err", "err", err)
-	// 	os.Exit(1)
-	// }
-
-	// a := Agent{
-	// 	pubKey: pubKeyCert,
-	// 	signer: privateKey,
-	// }
-
-	// os.Remove(*socketPath)
-	// l, err := net.Listen("unix", *socketPath)
-	// if err != nil {
-	// 	log.Fatalln("Failed to listen on UNIX socket:", err)
-	// }
+	os.Remove(*socketPath)
+	l, err := net.Listen("unix", *socketPath)
+	if err != nil {
+		log.Fatalln("Failed to listen on UNIX socket:", err)
+	}
+	log.Printf("listening on: %s", *socketPath)
 
 	for {
+		log.Printf("accept")
 		c, err := l.Accept()
+		log.Printf("got conn")
 		if err != nil {
 			type temporary interface {
 				Temporary() bool
@@ -129,20 +74,6 @@ func main() {
 		}
 		go a.serveConn(c)
 	}
-}
-
-func keyToPem(key crypto.PublicKey) string {
-	marshalled, err := x509.MarshalPKIXPublicKey(key)
-	if err != nil {
-		panic(err)
-	}
-
-	canonicalPem := pem.EncodeToMemory(&pem.Block{
-		Type:  "PUBLIC KEY",
-		Bytes: marshalled,
-	})
-
-	return string(canonicalPem)
 }
 
 func parseOpenSSHPublicCert(encoded []byte) (*ssh.Certificate, error) {
@@ -172,10 +103,11 @@ type Agent struct {
 	mu     sync.Mutex
 	pubKey ssh.PublicKey
 	cert   *ssh.Certificate
-	signer crypto.PrivateKey
+	signer ssh.Signer
 }
 
 func (a *Agent) fetchCert() error {
+	log.Printf("fetchcert")
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -184,13 +116,28 @@ func (a *Agent) fetchCert() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generate ssh key err: %w", err)
 	}
+
+	mprivkey, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		panic(err)
+	}
+	privBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: mprivkey,
+	})
+	fmt.Printf("private key:\n%s\n", privBytes)
+	publicKey, err := ssh.NewPublicKey(key.Public())
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("pubkey:\n%s\n", ssh.MarshalAuthorizedKey(publicKey))
 
 	signer, err := ssh.NewSignerFromKey(key)
 	if err != nil {
@@ -219,7 +166,7 @@ func (a *Agent) fetchCert() error {
 
 	certResult := make(chan string)
 
-	http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/"+nonceString {
 			w.WriteHeader(400)
 			fmt.Fprintln(w, "nope")
@@ -228,14 +175,18 @@ func (a *Agent) fetchCert() error {
 
 		r.ParseForm()
 		cert := r.FormValue("cert")
+		log.Printf("got cert: %s", cert)
 
 		select {
 		case certResult <- cert:
+			fmt.Fprintln(w, "cert loaded")
 		case <-ctx.Done():
+			fmt.Fprintln(w, "error cancelled")
 		}
 	}))
 
 	cbURL := "http://" + l.Addr().String() + "/" + nonceString
+	log.Printf("cburl: %s", cbURL)
 
 	signReq := msgs.PleaseSignRequest{
 		PublicKey:           signer.PublicKey().Marshal(),
@@ -273,6 +224,7 @@ func (a *Agent) fetchCert() error {
 	select {
 	case certTxt = <-certResult:
 	case <-ctx.Done():
+		log.Printf("context timed out")
 		return ctx.Err()
 	}
 
@@ -285,22 +237,36 @@ func (a *Agent) fetchCert() error {
 	a.pubKey = signer.PublicKey()
 	a.cert = pubKeyCert
 
+	log.Printf("pubkey ready!")
+	log.Printf("pubkey_cert: %s", certTxt)
+	log.Printf("pubkey: %s", signer.PublicKey())
+
 	return nil
 }
 
 // List returns the identities known to the agent.
 func (a *Agent) List() ([]*agent.Key, error) {
+	log.Printf("list")
 	if a.pubKey == nil {
 		err := a.fetchCert()
 		if err != nil {
 			return nil, err
 		}
 	}
-	return []*agent.Key{{
-		Format:  a.pubKey.Type(),
-		Blob:    a.pubKey.Marshal(),
-		Comment: fmt.Sprintf("TPM cert"),
-	}}, nil
+	fmt.Printf("format: %s\n", a.pubKey.Type())
+	fmt.Printf("cert format: %s\n", a.cert.Type())
+	return []*agent.Key{
+		{
+			Format:  a.pubKey.Type(),
+			Blob:    a.pubKey.Marshal(),
+			Comment: fmt.Sprintf("webkey"),
+		},
+		{
+			Format:  a.cert.Type(),
+			Blob:    a.cert.Marshal(),
+			Comment: fmt.Sprintf("webcert"),
+		},
+	}, nil
 }
 
 func (a *Agent) serveConn(c net.Conn) {
@@ -325,20 +291,11 @@ func (a *Agent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.Signat
 	}
 
 	if !bytes.Equal(a.pubKey.Marshal(), key.Marshal()) {
+		log.Printf("pubkey no matchy %v vs %v", a.pubKey.Marshal(), key.Marshal())
 		return nil, fmt.Errorf("no private keys match the requested public key")
 	}
 
-	signer, err := ssh.NewSignerFromKey(a.signer)
-	if err != nil {
-		return nil, fmt.Errorf("get ssh signer err: %w", err)
-	}
-
-	cert, ok := a.pubKey.(*ssh.Certificate)
-	if !ok {
-		return nil, errors.New("public key is not an ssh.Certificate")
-	}
-
-	signer, err = ssh.NewCertSigner(cert, signer)
+	signer, err := ssh.NewCertSigner(a.cert, a.signer)
 	if err != nil {
 		return nil, fmt.Errorf("new cert signer err: %w", err)
 	}
