@@ -6,10 +6,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -56,9 +54,7 @@ func main() {
 	log.Printf("listening on: %s", *socketPath)
 
 	for {
-		log.Printf("accept")
 		c, err := l.Accept()
-		log.Printf("got conn")
 		if err != nil {
 			type temporary interface {
 				Temporary() bool
@@ -107,7 +103,6 @@ type Agent struct {
 }
 
 func (a *Agent) fetchCert() error {
-	log.Printf("fetchcert")
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -123,21 +118,6 @@ func (a *Agent) fetchCert() error {
 	if err != nil {
 		return fmt.Errorf("generate ssh key err: %w", err)
 	}
-
-	mprivkey, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		panic(err)
-	}
-	privBytes := pem.EncodeToMemory(&pem.Block{
-		Type:  "EC PRIVATE KEY",
-		Bytes: mprivkey,
-	})
-	fmt.Printf("private key:\n%s\n", privBytes)
-	publicKey, err := ssh.NewPublicKey(key.Public())
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("pubkey:\n%s\n", ssh.MarshalAuthorizedKey(publicKey))
 
 	signer, err := ssh.NewSignerFromKey(key)
 	if err != nil {
@@ -175,7 +155,6 @@ func (a *Agent) fetchCert() error {
 
 		r.ParseForm()
 		cert := r.FormValue("cert")
-		log.Printf("got cert: %s", cert)
 
 		select {
 		case certResult <- cert:
@@ -186,7 +165,6 @@ func (a *Agent) fetchCert() error {
 	}))
 
 	cbURL := "http://" + l.Addr().String() + "/" + nonceString
-	log.Printf("cburl: %s", cbURL)
 
 	signReq := msgs.PleaseSignRequest{
 		PublicKey:           signer.PublicKey().Marshal(),
@@ -237,24 +215,17 @@ func (a *Agent) fetchCert() error {
 	a.pubKey = signer.PublicKey()
 	a.cert = pubKeyCert
 
-	log.Printf("pubkey ready!")
-	log.Printf("pubkey_cert: %s", certTxt)
-	log.Printf("pubkey: %s", signer.PublicKey())
-
 	return nil
 }
 
 // List returns the identities known to the agent.
 func (a *Agent) List() ([]*agent.Key, error) {
-	log.Printf("list")
 	if a.pubKey == nil {
 		err := a.fetchCert()
 		if err != nil {
 			return nil, err
 		}
 	}
-	fmt.Printf("format: %s\n", a.pubKey.Type())
-	fmt.Printf("cert format: %s\n", a.cert.Type())
 	return []*agent.Key{
 		{
 			Format:  a.pubKey.Type(),
@@ -291,7 +262,6 @@ func (a *Agent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.Signat
 	}
 
 	if !bytes.Equal(a.pubKey.Marshal(), key.Marshal()) {
-		log.Printf("pubkey no matchy %v vs %v", a.pubKey.Marshal(), key.Marshal())
 		return nil, fmt.Errorf("no private keys match the requested public key")
 	}
 
