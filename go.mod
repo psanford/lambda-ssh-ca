@@ -1,6 +1,6 @@
 module github.com/psanford/lambda-ssh-ca
 
-go 1.18
+go 1.19
 
 require (
 	github.com/aws/aws-lambda-go v1.34.1
@@ -11,7 +11,7 @@ require (
 	github.com/psanford/logmiddleware v0.0.0-20210423045917-73776f848da2
 	github.com/slack-go/slack v0.11.2
 	golang.org/x/crypto v0.0.0-20220722155217-630584e8d5aa
-	golang.org/x/sys v0.0.0-20211216021012-1d35b9e2eb4e
+	golang.org/x/sys v0.12.0
 )
 
 require (
